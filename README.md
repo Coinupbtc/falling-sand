@@ -2,6 +2,9 @@
 
 ![Screenshot](docs/screenshots/hero.png)
 
+
+![Screenshot](docs/screenshots/hero.png)
+
 ![Gameplay](docs/screenshots/gameplay.png)
 
 A browser falling-sand toy with chemistry reactions, bridge stress tests, and little walkers.
