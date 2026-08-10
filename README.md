@@ -3,7 +3,6 @@
 ![Screenshot](docs/screenshots/hero.png)
 
 
-![Screenshot](docs/screenshots/hero.png)
 
 ![Gameplay](docs/screenshots/gameplay.png)
 
