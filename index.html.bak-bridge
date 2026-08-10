@@ -1,0 +1,731 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Falling Sand — Chemistry Sim</title>
+<style>
+  :root { --bg:#0d0f16; --panel:#181c26; --edge:#262c3a; --text:#e6e9f0; --muted:#8a93a5; --accent:#5aa8ff; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { margin:0;padding:0;height:100%; background:var(--bg); color:var(--text); font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; overflow:hidden; overscroll-behavior:none; touch-action:none; }
+  #app { display:flex;flex-direction:column; height:100%; height:100vh; height:100dvh; width:100vw; width:100%; }
+  header { display:flex;align-items:center;gap:10px; padding:8px 12px; padding-top:calc(8px + env(safe-area-inset-top)); background:var(--panel); border-bottom:1px solid var(--edge); flex-shrink:0; }
+  header h1 { font-size:15px;margin:0;font-weight:600;flex-shrink:0; }
+  .status { font-size:12px;color:var(--muted);flex:1;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis; }
+  .toolbar { display:flex;gap:6px;padding:7px 10px; overflow-x:auto; background:var(--panel); border-bottom:1px solid var(--edge); flex-shrink:0; scrollbar-width:none; }
+  .toolbar::-webkit-scrollbar{ display:none; }
+  .tool { flex-shrink:0; padding:6px 10px;border-radius:9px; background:var(--edge); border:1px solid transparent; color:var(--text); font-size:12.5px;font-weight:500; cursor:pointer;user-select:none; display:flex;align-items:center;gap:5px; }
+  .tool .swatch{ width:12px;height:12px;border-radius:3px;display:inline-block; box-shadow:inset 0 0 0 1px rgba(255,255,255,.18); }
+  .tool.active{ border-color:var(--accent); background:#23334d; }
+  .tool.person .swatch{ background:transparent; }
+  .canvas-wrap { position:relative; flex:1; overflow:hidden; background:#0b0d12; touch-action:none; }
+  canvas { position:absolute; top:0;left:0;width:100%;height:100%;display:block; touch-action:none; }
+  .hint { position:absolute;top:12px;left:50%;transform:translateX(-50%); background:rgba(0,0,0,.6);color:#cfd4de;font-size:12px;padding:6px 12px;border-radius:12px; pointer-events:none; transition:opacity .6s; white-space:nowrap; }
+  .controls { display:flex;align-items:center;gap:12px; padding:8px 12px; padding-bottom:calc(8px + env(safe-area-inset-bottom)); background:var(--panel); border-top:1px solid var(--edge); flex-shrink:0; }
+  .controls label{ font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px; }
+  .controls input[type=range]{ width:90px;accent-color:var(--accent); }
+  .btn{ padding:7px 12px;border-radius:8px;background:#3a4152;color:var(--text);font-size:13px;border:none;cursor:pointer;font-weight:500; }
+  .btn.danger{ background:#5c2f33; }
+  .btn:active{ opacity:.8; }
+  .spacer{ flex:1; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>⚗️ Falling Sand — Chemistry Sim</h1>
+    <div class="status" id="status"></div>
+  </header>
+  <div class="toolbar" id="toolbar"></div>
+  <div class="canvas-wrap">
+    <canvas id="game"></canvas>
+    <div class="hint" id="hint">Drag to draw ✍️ · pick 👤 Person to drop little walkers</div>
+  </div>
+  <div class="controls">
+    <label>Size <input type="range" id="brush" min="1" max="28" value="8"></label>
+    <span class="spacer"></span>
+    <button class="btn" id="pause">⏸ Pause</button>
+    <button class="btn" id="speed">⏩ 1×</button>
+    <button class="btn danger" id="clear">🗑 Clear</button>
+  </div>
+</div>
+
+<script>
+(function(){
+"use strict";
+
+// ================= Canvas / window =================
+const canvas=document.getElementById('game');
+const ctx=canvas.getContext('2d');
+const wrap=document.querySelector('.canvas-wrap');
+const hint=document.getElementById('hint');
+const statusEl=document.getElementById('status');
+let W=0,H=0, cols=0, rows=0;
+const CELL=4;
+
+function resize(){
+  const r=wrap.getBoundingClientRect();
+  if(!r.width||!r.height||!isFinite(r.width)||!isFinite(r.height)){ requestAnimationFrame(resize); return; }
+  W=Math.max(1,Math.floor(r.width)); H=Math.max(1,Math.floor(r.height));
+  const dpr=Math.min(window.devicePixelRatio||1,2);
+  canvas.width=W*dpr; canvas.height=H*dpr;
+  canvas.style.width=W+'px'; canvas.style.height=H+'px';
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  cols=Math.max(1,Math.floor(W/CELL)); rows=Math.max(1,Math.floor(H/CELL));
+  resetArrays(); clearGrid();
+}
+window.addEventListener('resize',resize);
+
+// ================= Elements =================
+const T={
+  EMPTY:0,SAND:1,WATER:2,STONE:3,WOOD:4,FIRE:5,SMOKE:6,STEAM:7,OIL:8,SALT:9,
+  PLANT:10,ACID:11,LAVA:12,ICE:13,GUNPOWDER:14,METAL:15,GAS:16,FOG:17,ASH:18,
+  OBSIDIAN:19,GLASS:20,SPARK:21,NITRO:22,CEMENT:23,CONCRETE:24,SEED:25
+};
+
+// ONE bold, distinct base color per element (easy to tell apart at a glance).
+// Values are [r,g,b]; render adds only a small brightness jitter, hue never changes.
+const COLOR={
+  SAND:      [228,193,105],   // golden sand
+  WATER:     [58,140,255],    // vivid blue
+  STONE:     [154,163,178],   // flat slate gray
+  WOOD:      [160,106,56],    // rich brown
+  FIRE:      [255,90,30],     // orange-red
+  SMOKE:     [122,128,136],   // neutral gray
+  STEAM:     [226,236,247],   // pale blue-white
+  OIL:       [58,42,24],      // dark brown-black
+  SALT:      [252,252,252],   // pure white
+  PLANT:     [54,198,76],     // vivid green
+  ACID:      [124,255,0],     // electric poison green
+  LAVA:      [255,70,0],      // molten red-orange
+  ICE:       [174,231,255],   // pale cyan (clearly lighter than water)
+  GUNPOWDER: [46,43,51],      // near-black charcoal
+  METAL:     [184,196,214],   // cool silver
+  GAS:       [255,225,77],    // bright yellow
+  FOG:       [206,216,228],   // soft gray-white
+  ASH:       [142,140,136],   // warm gray
+  OBSIDIAN:  [92,56,112],     // purple-black
+  GLASS:     [216,242,255],   // translucent pale blue
+  SPARK:     [90,240,255],    // electric cyan
+  NITRO:     [255,122,61],    // hot amber-orange
+  CEMENT:    [120,122,130],   // dry concrete gray (distinct from stone? close) -> make it bluish gray
+  CONCRETE:  [160,164,172],   // set concrete (slightly lighter than stone, warm)
+  SEED:      [188,150,60],    // tan seed
+};
+const COLOR_BY_T=[
+  [0,0,0],COLOR.SAND,COLOR.WATER,COLOR.STONE,COLOR.WOOD,COLOR.FIRE,COLOR.SMOKE,COLOR.STEAM,
+  COLOR.OIL,COLOR.SALT,COLOR.PLANT,COLOR.ACID,COLOR.LAVA,COLOR.ICE,COLOR.GUNPOWDER,
+  COLOR.METAL,COLOR.GAS,COLOR.FOG,COLOR.ASH,COLOR.OBSIDIAN,COLOR.GLASS,COLOR.SPARK,COLOR.NITRO,
+  COLOR.CEMENT,COLOR.CONCRETE,COLOR.SEED
+];
+// Name lookup for toolbar/status
+const NAMES={0:'Empty',1:'Sand',2:'Water',3:'Stone',4:'Wood',5:'Fire',6:'Smoke',7:'Steam',
+  8:'Oil',9:'Salt',10:'Plant',11:'Acid',12:'Lava',13:'Ice',14:'Gunpowder',15:'Metal',16:'Gas',
+  17:'Fog',18:'Ash',19:'Obsidian',20:'Glass',21:'Spark',22:'Nitro',23:'Cement',24:'Concrete',25:'Seed'};
+function rgb(t){ const c=COLOR_BY_T[t]; return 'rgb('+c[0]+','+c[1]+','+c[2]+')'; }
+// per-cell shade: tiny brightness jitter only (hue locked -> still identifiable)
+function cellColor(x,y,t){
+  const c=COLOR_BY_T[t];
+  const v=((x*157+y*89+t*31)%23)-11; // -11..+11
+  let r=c[0]+v,g=c[1]+v,b=c[2]+v;
+  r=r<0?0:r>255?255:r; g=g<0?0:g>255?255:g; b=b<0?0:b>255?255:b;
+  return 'rgb('+r+','+g+','+b+')';
+}
+
+// density (higher = heavier)
+function getWeight(x,y){
+  if(!inBounds(x,y)) return 500;
+  const t=cur[y*cols+x];
+  switch(t){
+    case T.METAL: return 340; case T.CONCRETE: return 260; case T.STONE: return 200;
+    case T.OBSIDIAN: return 220; case T.GLASS: return 210; case T.CEMENT: return 150;
+    case T.SAND: return 120; case T.SALT: return 115; case T.GUNPOWDER: return 100;
+    case T.LAVA: return 130; case T.ACID: return 105; case T.WATER: return 100;
+    case T.ICE: return 90; case T.WOOD: return 80; case T.OIL: return 70;
+    case T.PLANT: return 60; case T.SEED: return 95;
+    default: return 0;
+  }
+}
+function isFluid(x,y){ if(!inBounds(x,y))return false; const t=cur[y*cols+x]; return t===T.WATER||t===T.OIL||t===T.ACID||t===T.LAVA||t===T.NITRO; }
+function isSolid(t){ return t===T.STONE||t===T.METAL||t===T.WOOD||t===T.GLASS||t===T.OBSIDIAN||t===T.CONCRETE||t===T.CEMENT||t===T.GUNPOWDER||t===T.SALT||t===T.ICE; }
+
+// ================= Data arrays =================
+let cur, next, life, temp, was;
+function resetArrays(){ cur=new Uint8Array(cols*rows); next=new Uint8Array(cols*rows); life=new Float32Array(cols*rows); temp=new Float32Array(cols*rows); was=new Uint8Array(cols*rows); }
+function promote(){ const c=cur; cur=next; next=c; next.fill(T.EMPTY); }
+function clearGrid(){ if(cur){ cur.fill(0);next.fill(0);life.fill(0);temp.fill(0);was.fill(0);} people.length=0; }
+function idx(x,y){ return y*cols+x; }
+function inBounds(x,y){ return x>=0&&y>=0&&x<cols&&y<rows; }
+function isEmpty(x,y){ return inBounds(x,y)&&cur[y*cols+x]===T.EMPTY; }
+function freeCell(x,y){ return inBounds(x,y)&&cur[y*cols+x]===T.EMPTY&&next[y*cols+x]===T.EMPTY; }
+
+// ================= Brush / inputs =================
+let brushType=T.SAND, brushSize=8;
+document.getElementById('brush').addEventListener('input',e=>brushSize=parseInt(e.target.value,10));
+let painting=false,lastX=0,lastY=0;
+
+function setCell(i,type,v){
+  cur[i]=type;
+  switch(type){
+    case T.FIRE: life[i]=40+Math.random()*50; temp[i]=0.95; break;
+    case T.LAVA: life[i]=400+Math.random()*250; temp[i]=1.0; break;
+    case T.SMOKE: life[i]=50+Math.random()*40; temp[i]=0.4; break;
+    case T.STEAM: life[i]=50+Math.random()*35; temp[i]=0.6; break;
+    case T.GAS: life[i]=60+Math.random()*45; temp[i]=0.4; break;
+    case T.FOG: life[i]=100+Math.random()*70; temp[i]=0.15; break;
+    case T.SPARK: life[i]=7+(Math.random()*8|0); temp[i]=0.8; break;
+    case T.ICE: life[i]=1; temp[i]=0.0; break;
+    case T.SEED: life[i]=1; temp[i]=0.3; break;
+    case T.SALT: life[i]=1; temp[i]=0.25; break;
+    case T.GUNPOWDER: life[i]=1; temp[i]=0.25; break;
+    case T.NITRO: life[i]=1; temp[i]=0.3; break;
+    default: life[i]=1; temp[i]=0.25; break;
+  }
+}
+function paintAt(gx,gy){
+  if(brushType===T.PERSON){ spawnPerson(gx,gy); return; }
+  const r=Math.max(1,brushSize>>1);
+  for(let dy=-r;dy<=r;dy++)for(let dx=-r;dx<=r;dx++){
+    if(dx*dx+dy*dy>r*r)continue;
+    const x=gx+dx,y=gy+dy; if(!inBounds(x,y))continue;
+    const i=idx(x,y);
+    const hard=cur[i]===T.STONE||cur[i]===T.METAL||cur[i]===T.WOOD||cur[i]===T.OBSIDIAN||cur[i]===T.GLASS||cur[i]===T.CONCRETE;
+    if(hard && brushType!==T.ACID&&brushType!==T.LAVA&&brushType!==T.FIRE&&brushType!==T.SPARK)continue;
+    setCell(i,brushType,1);
+  }
+}
+
+// pointer/touch/mouse input (bulletproof, from original)
+let activePointerId=null;
+function clientPoint(e){ const r=wrap.getBoundingClientRect(); const cx=e.clientX-r.left,cy=e.clientY-r.top; return {x:Math.floor((cx-offX())/scale()),y:Math.floor((cy-offY())/scale())}; }
+// (simple helpers since background has no offset)
+function offX(){return 0;} function offY(){return 0;} function scale(){return CELL;}
+function beginPaint(cx,cy){ painting=true; lastX=cx;lastY=cy; paintAt(cx,cy); if(hint)hint.style.opacity='0'; }
+function start(e){ const p=clientPoint(e); beginPaint(p.x,p.y); }
+function move(e){
+  if(!painting)return;
+  const p=clientPoint(e);
+  const steps=Math.max(1,Math.abs(p.x-lastX),Math.abs(p.y-lastY));
+  for(let s=1;s<=steps;s++)paintAt(Math.round(lastX+(p.x-lastX)*s/steps),Math.round(lastY+(p.y-lastY)*s/steps));
+  lastX=p.x;lastY=p.y;
+}
+function end(){ painting=false; activePointerId=null; }
+function noop(e){ if(e)e.preventDefault(); }
+if(window.PointerEvent){
+  const pd=e=>{e.preventDefault();activePointerId=e.pointerId;try{wrap.setPointerCapture(e.pointerId);}catch(_){}const p=clientPoint(e);beginPaint(p.x,p.y);};
+  const pm=e=>{if(e.pointerId!==activePointerId&&activePointerId!==null)return;move(e);};
+  const pe=e=>{if(e.pointerId!==activePointerId&&activePointerId!==null)return;end();};
+  [wrap].forEach(el=>{el.addEventListener('pointerdown',pd);el.addEventListener('pointermove',pm);el.addEventListener('pointerup',pe);el.addEventListener('pointercancel',pe);});
+}
+[wrap].forEach(el=>{
+  el.addEventListener('touchstart',e=>{e.preventDefault();const t=e.touches[0];if(!t)return;const p=clientPoint(t);beginPaint(p.x,p.y);},{passive:false});
+  el.addEventListener('touchmove',e=>{e.preventDefault();const t=e.touches[0];if(!t||!painting)return;const p=clientPoint(t);const st=Math.max(1,Math.abs(p.x-lastX),Math.abs(p.y-lastY));for(let s=1;s<=st;s++)paintAt(Math.round(lastX+(p.x-lastX)*s/st),Math.round(lastY+(p.y-lastY)*s/st));lastX=p.x;lastY=p.y;},{passive:false});
+  el.addEventListener('touchend',e=>{e.preventDefault();end();});
+  el.addEventListener('touchcancel',end);
+});
+[wrap].forEach(el=>{el.addEventListener('mousedown',e=>{if(activePointerId!==null&&window.PointerEvent)return;e.preventDefault();start(e);});});
+window.addEventListener('mousemove',e=>{if(activePointerId!==null&&window.PointerEvent)return;move(e);});
+window.addEventListener('mouseup',e=>{if(activePointerId!==null&&window.PointerEvent)return;end();});
+canvas.addEventListener('contextmenu',noop);
+wrap.addEventListener('contextmenu',noop);
+['touchstart','touchmove'].forEach(t=>document.addEventListener(t,noop,{passive:false}));
+
+// add PERSON pseudo-type for toolbar (not a grid particle)
+T.PERSON=99;
+
+// ================= Toolbar =================
+const toolDefs=[
+  {t:T.PERSON,  label:'👤 Person', person:true},
+  {t:T.SAND,    label:'Sand',   color:rgb(T.SAND)},
+  {t:T.WATER,   label:'Water',  color:rgb(T.WATER)},
+  {t:T.STONE,   label:'Stone',  color:rgb(T.STONE)},
+  {t:T.WOOD,    label:'Wood',   color:rgb(T.WOOD)},
+  {t:T.PLANT,   label:'Plant',  color:rgb(T.PLANT)},
+  {t:T.SEED,    label:'Seed',   color:rgb(T.SEED)},
+  {t:T.ICE,     label:'Ice',    color:rgb(T.ICE)},
+  {t:T.CEMENT,  label:'Cement', color:rgb(T.CEMENT)},
+  {t:T.SALT,    label:'Salt',   color:rgb(T.SALT)},
+  {t:T.OIL,     label:'Oil',    color:rgb(T.OIL)},
+  {t:T.GUNPOWDER,label:'Gunpowder',color:rgb(T.GUNPOWDER)},
+  {t:T.NITRO,   label:'Nitro',  color:rgb(T.NITRO)},
+  {t:T.GAS,     label:'Gas',    color:rgb(T.GAS)},
+  {t:T.FIRE,    label:'Fire',   color:rgb(T.FIRE)},
+  {t:T.SPARK,   label:'Spark',  color:rgb(T.SPARK)},
+  {t:T.LAVA,    label:'Lava',   color:rgb(T.LAVA)},
+  {t:T.ACID,    label:'Acid',   color:rgb(T.ACID)},
+  {t:T.METAL,   label:'Metal',  color:rgb(T.METAL)},
+  {t:T.GLASS,   label:'Glass',  color:rgb(T.GLASS)},
+  {t:T.OBSIDIAN,label:'Obsidian',color:rgb(T.OBSIDIAN)},
+  {t:T.SMOKE,   label:'Smoke',  color:rgb(T.SMOKE)},
+  {t:T.STEAM,   label:'Steam',  color:rgb(T.STEAM)},
+  {t:T.FOG,     label:'Fog',    color:rgb(T.FOG)},
+  {t:T.ASH,     label:'Ash',    color:rgb(T.ASH)},
+];
+const toolbar=document.getElementById('toolbar');
+const byType={};
+toolDefs.forEach(d=>{
+  const b=document.createElement('button');
+  b.className='tool'+(d.t===T.SAND?' active':'')+(d.person?' person':'');
+  if(d.person) b.textContent=d.label; else b.innerHTML=`<span class="swatch" style="background:${d.color}"></span>${d.label}`;
+  b.addEventListener('pointerdown',e=>{e.preventDefault();brushType=d.t;toolbar.querySelectorAll('.tool').forEach(x=>x.classList.remove('active'));b.classList.add('active');});
+  toolbar.appendChild(b); byType[d.t]=b;
+});
+
+// ================= Buttons =================
+let paused=false, speedMul=1;
+document.getElementById('pause').addEventListener('click',()=>{paused=!paused;document.getElementById('pause').textContent=paused?'▶ Resume':'⏸ Pause';if(!paused)scheduleTick();});
+document.getElementById('speed').addEventListener('click',()=>{speedMul=speedMul===1?2:speedMul===2?4:1;document.getElementById('speed').textContent='⏩ '+speedMul+'×';});
+document.getElementById('clear').addEventListener('click',()=>{clearGrid();resetArrays();});
+
+// ================= Persons (stick-figure walkers) =================
+// Each person is a separate little agent. Brainless: picks a direction and walks,
+// bouncing off walls, falling off ledges, walking into fire/acid/lava (dies),
+// drowning in water, getting buried in sand (trapped -> suffocates).
+function newPerson(gx,gy){
+  return {
+    x:(gx+0.5)*CELL, y:(gy+0.5)*CELL,   // pixel pos of feet center-ish
+    vx:0, vy:0, dir: Math.random()<0.5?-1:1,
+    hp:1.0, state:'alive',               // alive | drowning | dead
+    air:1.0,                             // breath for drowning/suffocation
+    anim:Math.random()*9, walkCycle:0,
+    stuckTimer:0, swapTimer:0,
+    hue: 150+Math.random()*180,          // random shirt color
+  };
+}
+let people=[];
+function spawnPerson(gx,gy){
+  if(!inBounds(gx,gy))return;
+  // don't spawn inside solid
+  const t=cur[gy*cols+gx];
+  if(isSolid(t)||t===T.FIRE||t===T.LAVA)return;
+  people.push(newPerson(gx,gy));
+  if(people.length>80) people.shift(); // cap
+}
+const PW=6, PH=16; // pixel footprint for collision
+function px2cell(px){ return Math.floor(px/CELL); }
+// check a given pixel point against the grid: returns the type at that cell
+function cellTypeAtPix(px,py){
+  const x=Math.floor(px/CELL), y=Math.floor(py/CELL);
+  if(x<0||y<0||x>=cols||y>=rows) return T.STONE; // world edges are walls
+  return cur[y*cols+x];
+}
+// is a point passable for walking (not solid, not too tall)?
+function passable(px,py){ const t=cellTypeAtPix(px,py); return !(isSolid(t)||t===T.CONCRETE||t===T.CEMENT); }
+function updatePerson(p, dt){
+  if(p.state==='dead') return;
+  p.walkCycle+=dt*6;
+  // choose a random new direction when unsure
+  p.swapTimer-=dt;
+  if(p.swapTimer<=0 && Math.random()<0.06){ p.dir=Math.random()<0.5?-1:1; p.swapTimer=2+Math.random()*3; }
+
+  // ---- what's at the feet / body (hazard check) ----
+  const bodyX=p.x, bodyMid=p.y-PH*0.4, bodyTop=p.y-PH;
+  const samples=[cellTypeAtPix(bodyX,bodyTop), cellTypeAtPix(bodyX,p.y), cellTypeAtPix(bodyX,bodyMid), cellTypeAtPix(p.x+p.dir*3,bodyMid)];
+  let inHazard=false;
+  for(const t of samples){
+    if(t===T.FIRE){ p.hp-=dt*1.2; inHazard=true; }
+    else if(t===T.LAVA){ p.hp-=dt*4.0; inHazard=true; }
+    else if(t===T.ACID){ p.hp-=dt*1.6; inHazard=true; }
+  }
+  if(p.hp<=0){ die(p); return; }
+
+  // ---- walking on a horizontal surface / jumping vs falling ----
+  // ground check: is there solid just below the feet?
+  const groundT=cellTypeAtPix(p.x, p.y+2);
+  const onGround = (isSolid(groundT)||groundT===T.CONCRETE||groundT===T.CEMENT);
+  let inWater=0; for(const t of samples) if(t===T.WATER||t===T.STEAM) inWater++;
+
+  // ---- movement ----
+  const speed = inWater? 0.30 : 0.55;
+  let ax=0, ay=0.18; // gravity
+  if(onGround && inWater===0){
+    // walk
+    p.walkCycle+=2;
+    if(Math.random()<0.012) p.dir*=-1;         // brainless: randomly turn
+    ax += p.dir*speed*8;
+  }
+  // horizontal clamp & wall collision
+  p.vx += ax*dt; p.vx *= inWater? 0.90 : 0.94;
+  if(p.vx>1.6)p.vx=1.6; if(p.vx<-1.6)p.vx=-1.6;
+  const nx=p.x+p.vx;
+  if(!passable(nx, p.y) ) { p.vx=0; if(!onGround && Math.random()<0.3) p.dir*=-1; }
+  else p.x=nx;
+  // vertical + ground/foot collisions
+  p.vy+=ay*dt; if(p.vy>1.4)p.vy=1.4;
+  const ny=p.y+p.vy;
+  const below=cellTypeAtPix(nx||p.x, ny+2);
+  if(isSolid(below)||below===T.CONCRETE||below===T.CEMENT){
+    if(p.vy>0){ p.y=Math.floor((ny+2)/CELL)*CELL-2; p.vy=0; }
+  } else {
+    p.y=ny;
+    if(p.y>rows*CELL){ p.hp=0; die(p); return; } // fell out the bottom
+  }
+
+  // ---- water / drowning ----
+  if(inWater>0){ p.air-=dt*0.12; } else { p.air=Math.min(1.0,p.air+dt*0.5); }
+  if(p.state==='drowning'){ if(p.air<=0){ die(p); return; } p.hp-=dt*0.03; }
+  if(p.air<0.35){ p.state='drowning'; } else if(p.air>0.6 && p.state==='drowning'){ p.state='alive'; }
+
+  // ---- getting buried / trapped by falling sand ----
+  const headT=cellTypeAtPix(p.x,p.y-PH);
+  if((headT===T.SAND||headT===T.GUNPOWDER||headT===T.SALT||headT===T.CEMENT) && !onGround){
+    p.stuckTimer+=dt;
+    if(p.stuckTimer>2.5){ p.hp-=dt*0.18; } // suffocating under a pile
+  } else p.stuckTimer=0;
+
+  // ---- explosions knock people around ----
+  // (checked via a shared list set by explode())
+}
+function die(p){
+  // drop a little blood/ash and a corpse puff
+  const gx=px2cell(p.x), gy=px2cell(p.y);
+  if(inBounds(gx,gy)&&Math.random()<0.9){ const i=idx(gx,gy); if(cur[i]===T.EMPTY) setCell(i,T.ASH,1); }
+  // leave ash trail
+  for(let k=0;k<3;k++){ const x=px2cell(p.x+((Math.random()*8-4))), y=px2cell(p.y-((Math.random()*8))); if(inBounds(x,y)&&cur[y*cols+x]===T.EMPTY) setCell(idx(x,y),T.ASH,1); }
+  p.state='dead';
+}
+
+// apply explosion force to nearby people (called by explode)
+let blastEvents=[];
+
+// ================= Core simulation =================
+function update(){
+  const dt=speedMul;
+  for(let rep=0; rep<speedMul; rep++) updateGrid();
+  const pdt=dt/60.0;
+  for(const p of people) updatePerson(p, pdt);
+  people=people.filter(p=>p.state!=='dead');
+}
+
+function updateGrid(){
+  const flip=Math.random()<0.5;
+  for(let y=rows-1;y>=0;y--){
+    if(flip){for(let x=cols-1;x>=0;x--){const i=y*cols+x,t=cur[i];if(t!==T.EMPTY)updateParticle(x,y,t,i);}}
+    else{for(let x=0;x<cols;x++){const i=y*cols+x,t=cur[i];if(t!==T.EMPTY)updateParticle(x,y,t,i);}}
+  }
+  conductPass();
+  diffuseHeat();
+  peopleReact();
+  blastEvents.length=0;
+}
+
+function moveTo(x,y,xi,yi){const ni=y*cols+x;if(next[ni]!==T.EMPTY)return false;const si=yi*cols+xi;next[ni]=cur[si];life[ni]=life[si];temp[ni]=temp[si];cur[si]=T.EMPTY;return true;}
+function placeStatic(x,y,i){if(next[y*cols+x]===T.EMPTY){next[y*cols+x]=cur[i];life[y*cols+x]=life[i];temp[y*cols+x]=temp[i];}cur[i]=T.EMPTY;}
+function swapDown(x,y,i,type){const b=cur[(y+1)*cols+x];cur[i]=b;temp[i]=temp[(y+1)*cols+x];life[i]=life[(y+1)*cols+x];next[(y+1)*cols+x]=type;life[(y+1)*cols+x]=life[i];temp[(y+1)*cols+x]=temp[i];cur[(y+1)*cols+x]=T.EMPTY;}
+function swapDiag(x,y,dir,type){const tgt=(y+1)*cols+(x+dir);if(!inBounds(x+dir,y+1))return;const b=cur[tgt];cur[tgt]=cur[y*cols+x];next[tgt]=cur[y*cols+x];temp[tgt]=temp[y*cols+x];life[tgt]=life[y*cols+x];cur[y*cols+x]=T.EMPTY;if(b!==T.EMPTY){cur[y*cols+x]=b;temp[y*cols+x]=temp[tgt];life[y*cols+x]=life[tgt];}}
+
+function updateParticle(x,y,t,i){
+  switch(t){
+    case T.SAND: case T.SALT: case T.SEED: case T.CEMENT: stepGrainsFall(x,y,i); break;
+    case T.GUNPOWDER: stepGunpowder(x,y,i); break;
+    case T.ASH: stepAsh(x,y,i); break;
+    case T.WATER: stepFluid(x,y,i,T.WATER,0.7); break;
+    case T.OIL: stepFluid(x,y,i,T.OIL,0.92); break;
+    case T.NITRO: stepNitro(x,y,i); break;
+    case T.ACID: stepAcid(x,y,i); break;
+    case T.LAVA: stepLava(x,y,i); break;
+    case T.FIRE: stepFire(x,y,i); break;
+    case T.SPARK: stepSpark(x,y,i); break;
+    case T.SMOKE: stepRise(x,y,i,T.SMOKE); break;
+    case T.STEAM: stepRise(x,y,i,T.STEAM); break;
+    case T.GAS: stepGas(x,y,i); break;
+    case T.FOG: stepFog(x,y,i); break;
+    case T.PLANT: stepPlant(x,y,i); break;
+    case T.ICE: placeStatic(x,y,i); break;
+    case T.CONCRETE: case T.STONE: case T.METAL: case T.GLASS: case T.OBSIDIAN: case T.WOOD: placeStatic(x,y,i); break;
+    default: placeStatic(x,y,i); break;
+  }
+}
+
+// ---- grains/sinking solids ----
+function stepGrainsFall(x,y,i){
+  const t=cur[i];
+  // seed + water -> plant
+  if(t===T.SEED && hasNbr(x,y,T.WATER,1)){ if(Math.random()<0.08){ cur[i]=T.PLANT; next[i]=T.PLANT; temp[i]=0.3; return; } }
+  // cement + water -> concrete (consumes the water, hardens) — reliable on contact
+  if(t===T.CEMENT){
+    const ni = findNbr(x,y,T.WATER,1);
+    if(ni>=0){ cur[i]=T.CONCRETE; next[i]=T.CONCRETE; temp[i]=0.4; cur[ni]=T.EMPTY; next[ni]=T.EMPTY; return; }
+  }
+  if(freeCell(x,y+1)){ moveTo(x,y+1,x,y); return; }
+  if(isFluid(x,y+1)){ swapDown(x,y,i,t); return; }
+  const d=Math.random()<0.5?-1:1;
+  if(freeCell(x+d,y+1)){moveTo(x+d,y+1,x,y);return;}
+  if(freeCell(x-d,y+1)){moveTo(x-d,y+1,x,y);return;}
+  placeStatic(x,y,i);
+}
+function findNbr(x,y,type,r){ for(let dy=-r;dy<=r;dy++)for(let dx=-r;dx<=r;dx++){const nx=x+dx,ny=y+dy;if(nx===x&&ny===y)continue;if(!inBounds(nx,ny))continue;if(cur[ny*cols+nx]===type)return ny*cols+nx;} return -1; }
+function stepGunpowder(x,y,i){
+  if(hasNbr(x,y,T.FIRE,1)||temp[i]>0.75){ explode(x,y,2,2); return; }
+  if(freeCell(x,y+1)){moveTo(x,y+1,x,y);return;}
+  const d=Math.random()<0.5?-1:1;
+  if(freeCell(x+d,y+1)){moveTo(x+d,y+1,x,y);return;}
+  if(freeCell(x-d,y+1)){moveTo(x-d,y+1,x,y);return;}
+  placeStatic(x,y,i);
+}
+function stepAsh(x,y,i){
+  if(Math.random()<0.4){ if(freeCell(x,y+1)){moveTo(x,y+1,x,y);return;} const d=Math.random()<0.5?-1:1; if(freeCell(x+d,y+1)){moveTo(x+d,y+1,x,y);return;} if(freeCell(x+d,y)){moveTo(x+d,y,x,y);return;} } else { if(freeCell(x,y+1)){moveTo(x,y+1,x,y);return;} }
+  placeStatic(x,y,i);
+}
+
+// ---- fluid ----
+function stepFluid(x,y,i,t,stick){
+  if(Math.random()>stick){ placeStatic(x,y,i); return; }
+  if(freeCell(x,y+1)||isFluid(x,y+1)){
+    if(getWeight(x,y+1)<getWeight(x,y)){ if(isFluid(x,y+1)) swapDown(x,y,i,t); else moveTo(x,y+1,x,y); return; }
+  }
+  const d=Math.random()<0.5?-1:1;
+  if(isFluid(x+d,y+1)||freeCell(x+d,y+1)){ if(inBounds(x+d,y+1)&&getWeight(x+d,y+1)<getWeight(x,y)){ if(isFluid(x+d,y+1))swapDiag(x,y,d,t); else moveTo(x+d,y+1,x,y); return; } }
+  if(isFluid(x-d,y+1)||freeCell(x-d,y+1)){ if(inBounds(x-d,y+1)&&getWeight(x-d,y+1)<getWeight(x,y)){ if(isFluid(x-d,y+1))swapDiag(x,y,-d,t); else moveTo(x-d,y+1,x,y); return; } }
+  const hd=Math.random()<0.5?-1:1;
+  if(freeCell(x+hd,y)){moveTo(x+hd,y,x,y);return;}
+  if(freeCell(x-hd,y)){moveTo(x-hd,y,x,y);return;}
+  placeStatic(x,y,i);
+}
+// acid dissolves + neutralized by water
+function stepAcid(x,y,i){
+  const nb=[[0,1],[0,-1],[1,0],[-1,0],[1,1],[-1,1],[1,-1],[-1,-1]];
+  for(const[dx,dy]of nb){const nx=x+dx,ny=y+dy;if(!inBounds(nx,ny))continue;if(cur[ny*cols+nx]===T.WATER||next[ny*cols+nx]===T.WATER){if(Math.random()<0.6){cur[i]=T.EMPTY;next[i]=T.EMPTY;return;}}}
+  for(const[dx,dy]of nb){const nx2=x+dx,ny2=y+dy;if(!inBounds(nx2,ny2))continue;const ni=ny2*cols+nx2,nt=cur[ni];if(nt===T.EMPTY||nt===T.ACID)continue;let p;
+    if(nt===T.STONE)p=0.05;else if(nt===T.METAL)p=0.03;else if(nt===T.OBSIDIAN)p=0.01;else if(nt===T.GLASS)p=0;else if(nt===T.SALT)p=0.5;else p=0.3;
+    if(p>0&&Math.random()<p){cur[ni]=T.EMPTY;next[ni]=T.EMPTY;}}
+  stepFluid(x,y,i,T.ACID,0.85);
+}
+// lava: reacts richly
+function stepLava(x,y,i){
+  const ign=[[0,1],[0,-1],[1,0],[-1,0],[1,1],[-1,1],[1,-1],[-1,-1]];
+  const ntype=(nx,ny)=>{const ni=ny*cols+nx;return cur[ni]!==T.EMPTY?cur[ni]:next[ni];};
+  let reacted=false;
+  for(const[dx,dy]of ign){const nx=x+dx,ny=y+dy;if(!inBounds(nx,ny))continue;const ni=ny*cols+nx,nt=ntype(nx,ny);
+    if(nt===T.WOOD||nt===T.OIL||nt===T.PLANT){if(Math.random()<0.1){ignite(nx,ny);reacted=true;break;}}
+    else if(nt===T.WATER){if(Math.random()<0.35){cur[ni]=T.STEAM;life[ni]=30+Math.random()*20;next[ni]=T.STEAM;cur[y*cols+x]=T.STONE;next[y*cols+x]=T.STONE;life[y*cols+x]=1;reacted=true;break;}}
+    else if(nt===T.ICE){if(Math.random()<0.5){cur[ni]=T.STEAM;life[ni]=25;next[ni]=T.STEAM;cur[y*cols+x]=T.OBSIDIAN;next[y*cols+x]=T.OBSIDIAN;life[y*cols+x]=1;reacted=true;break;}}
+    else if(nt===T.SAND){if(Math.random()<0.35){cur[ni]=T.GLASS;next[ni]=T.GLASS;life[ni]=1;temp[ni]=0.5;reacted=true;break;}}
+    else if(nt===T.SALT){if(Math.random()<0.4){cur[ni]=T.GLASS;next[ni]=T.GLASS;reacted=true;break;}}   // lava melts salt to glass too
+    else if(nt===T.ACID){cur[y*cols+x]=T.OBSIDIAN;next[y*cols+x]=T.OBSIDIAN;life[y*cols+x]=1;cur[ni]=T.EMPTY;next[ni]=T.EMPTY;reacted=true;break;} // acidic quench -> obsidian
+    else if(nt===T.GUNPOWDER||nt===T.NITRO){if(Math.random()<0.5){explode(nx,ny,2,2);reacted=true;break;}}
+  }
+  if(reacted){placeStatic(x,y,i);return;}
+  life[i]-=1; temp[i]-=0.004;
+  let cold=0; for(const[dx,dy]of ign){const nx=x+dx,ny=y+dy;if(!inBounds(nx,ny))continue;const t=ntype(nx,ny);if(t===T.WATER||t===T.ICE||t===T.FOG)cold++;}
+  if(cold>0&&Math.random()<0.15){cur[y*cols+x]=T.OBSIDIAN;next[y*cols+x]=T.OBSIDIAN;life[y*cols+x]=1;return;}
+  if(life[i]<=0||temp[i]<=0.5){cur[y*cols+x]=T.STONE;next[y*cols+x]=T.STONE;life[y*cols+x]=1;return;}
+  stepFluid(x,y,i,T.LAVA,0.5);
+}
+// fire: burns, doused by water/acid, melts ice
+function stepFire(x,y,i){
+  life[i]-=1;
+  if(life[i]<=0){if(Math.random()<0.45){cur[i]=T.SMOKE;life[i]=30+Math.random()*20;next[i]=T.SMOKE;}else{cur[i]=T.EMPTY;next[i]=T.EMPTY;}return;}
+  const n=[[0,1],[0,-1],[1,0],[-1,0],[1,1],[-1,1],[1,-1],[-1,-1]];
+  const eff=(nx,ny)=>{const ni=ny*cols+nx;return cur[ni]!==T.EMPTY?cur[ni]:next[ni];};
+  // douse
+  for(const[dx,dy]of n){const nx=x+dx,ny=y+dy;if(!inBounds(nx,ny))continue;const t=eff(nx,ny);if(t===T.WATER||t===T.ACID||t===T.FOG){cur[i]=T.STEAM;next[i]=T.STEAM;const wet=t===T.ACID?T.SMOKE:T.STEAM;if(t===T.WATER||t===T.FOG){cur[i]=T.STEAM;next[i]=T.STEAM;}else{cur[i]=T.SMOKE;next[i]=T.SMOKE;}return;}}
+  // ignite fuel / melt ice
+  for(const[dx,dy]of n){const nx=x+dx,ny=y+dy;if(!inBounds(nx,ny))continue;const t=eff(nx,ny);if(t===T.WOOD||t===T.OIL||t===T.PLANT){if(Math.random()<0.07)ignite(nx,ny);}else if(t===T.ICE){if(Math.random()<0.2){cur[ny*cols+nx]=T.WATER;next[ny*cols+nx]=T.WATER;}}else if(t===T.GUNPOWDER||t===T.NITRO){if(Math.random()<0.2)explode(nx,ny,2,2);}}
+  // also evaporate adjacent water
+  if(Math.random()<0.35&&hasNbr(x,y,T.WATER,1)){/* occasionally steam nearby water */}
+  if(Math.random()<0.3&&isEmpty(x,y-1)){moveTo(x,y-1,x,y);}
+  else if(Math.random()<0.04){if(isEmpty(x,y-1)){cur[(y-1)*cols+x]=T.SMOKE;next[(y-1)*cols+x]=T.SMOKE;life[(y-1)*cols+x]=30+Math.random()*20;}placeStatic(x,y,i);}
+  else placeStatic(x,y,i);
+}
+// spark: travels conductors, ignites
+function stepSpark(x,y,i){
+  life[i]-=1;
+  if(life[i]<=0){const r=was[i];cur[i]=r?r:T.EMPTY;if(r){next[i]=r;was[i]=0;}return;}
+  const n=[[0,1],[0,-1],[1,0],[-1,0],[1,1],[-1,1],[1,-1],[-1,-1]];
+  const eff=(nx,ny)=>{const ni=ny*cols+nx;return cur[ni]!==T.EMPTY?cur[ni]:next[ni];};
+  for(const[dx,dy]of n){const nx=x+dx,ny=y+dy;if(!inBounds(nx,ny))continue;const nt=eff(nx,ny);if(nt===T.GUNPOWDER||nt===T.NITRO||nt===T.GAS){if(Math.random()<0.6)explode(nx,ny,2,2);continue;}else if(nt===T.WOOD||nt===T.OIL||nt===T.PLANT){if(Math.random()<0.3&&isFuel(nx,ny))ignite(nx,ny);}}
+  // Conduction handled by conductPass() after the particle loop. Do NOT placeStatic
+  // here: keep the spark in `cur` so conductPass sees it and moves it along wires.
+}
+function conductPass(){
+  const dirs=[[0,1],[0,-1],[1,0],[-1,0]];
+  for(let y=rows-1;y>=0;y--)for(let x=cols-1;x>=0;x--){
+    const i=y*cols+x; if(cur[i]!==T.SPARK)continue;
+    const myRestore=was[i];
+    for(const[dx,dy]of dirs){const nx=x+dx,ny=y+dy;if(!inBounds(nx,ny))continue;const ni=ny*cols+nx;const c=cur[ni],nx2=next[ni];
+      const isC=(c===T.METAL||c===T.WATER||nx2===T.METAL||nx2===T.WATER);
+      if(!isC)continue; if(next[ni]===T.SPARK)continue;
+      was[ni]=c!==T.EMPTY?c:nx2; next[ni]=T.SPARK; life[ni]=life[i];
+      cur[i]=myRestore?myRestore:T.EMPTY; if(myRestore){next[i]=myRestore;was[i]=0;}
+      break;
+    }
+  }
+}
+// rising gases
+function stepRise(x,y,i,t){
+  life[i]-=1;
+  if(life[i]<=0){const cond=(t===T.STEAM||t===T.FOG);cur[i]=cond?T.WATER:T.EMPTY;if(cond)next[i]=T.WATER;life[i]=1;return;}
+  const up=Math.random()<0.5?-1:1;
+  if(inBounds(x+up,y-1)&&isEmpty(x+up,y-1)){moveTo(x+up,y-1,x,y);return;}
+  if(isEmpty(x,y-1)){moveTo(x,y-1,x,y);return;}
+  if(freeCell(x+up,y)){moveTo(x+up,y,x,y);return;}
+  placeStatic(x,y,i);
+}
+function stepGas(x,y,i){
+  life[i]-=1; if(life[i]<=0){cur[i]=T.EMPTY;return;}
+  if(hasNbr(x,y,T.FIRE,1)||hasNbr(x,y,T.SPARK,1)){explode(x,y,3,2);return;}
+  const up=Math.random()<0.5?-1:1;
+  if(inBounds(x+up,y-1)&&isEmpty(x+up,y-1)){moveTo(x+up,y-1,x,y);return;}
+  if(isEmpty(x,y-1)){moveTo(x,y-1,x,y);return;}
+  if(freeCell(x+up,y)){moveTo(x+up,y,x,y);return;}
+  placeStatic(x,y,i);
+}
+function stepFog(x,y,i){
+  life[i]-=1; if(life[i]<=0){cur[i]=T.WATER;next[i]=T.WATER;life[i]=1;return;}
+  const d=Math.random()<0.5?-1:1;
+  if(freeCell(x,y+1)){moveTo(x,y+1,x,y);return;}
+  if(inBounds(x+d,y)&&freeCell(x+d,y)){moveTo(x+d,y,x,y);return;}
+  placeStatic(x,y,i);
+}
+// nitro: unstable explosive liquid
+function stepNitro(x,y,i){
+  if(hasNbr(x,y,T.FIRE,1)||hasNbr(x,y,T.SPARK,1)||temp[i]>0.75){explode(x,y,3,3);return;}
+  stepFluid(x,y,i,T.NITRO,0.6);
+}
+// plant: grows with water; seed grows to plant
+function stepPlant(x,y,i){
+  const wet=[[0,-1],[0,1],[-1,0],[1,0],[-1,-1],[1,-1],[-1,1],[1,1]];
+  let hw=false,wx=0,wy=0;
+  for(const[dx,dy]of wet){const nx=x+dx,ny=y+dy;if(!inBounds(nx,ny))continue;const ni=ny*cols+nx;if(cur[ni]===T.WATER||next[ni]===T.WATER){hw=true;wx=nx;wy=ny;break;}}
+  if(y>0&&isEmpty(x,y-1)&&hw){if(Math.random()<0.02){const ni=(y-1)*cols+x;cur[ni]=T.PLANT;life[ni]=1;cur[i]=T.PLANT;if(Math.random()<0.12&&inBounds(wx,wy)&&cur[wy*cols+wx]===T.WATER)cur[wy*cols+wx]=T.EMPTY;}}
+  placeStatic(x,y,i);
+}
+
+// ---- helpers ----
+function hasNbr(x,y,type,r){ for(let dy=-r;dy<=r;dy++)for(let dx=-r;dx<=r;dx++){const nx=x+dx,ny=y+dy;if(!inBounds(nx,ny))continue;if(cur[ny*cols+nx]===type)return true;} return false; }
+function hasNbrBuf(x,y,type){ // checks next buffer too
+  for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){const nx=x+dx,ny=y+dy;if(!inBounds(nx,ny))continue;if(next[ny*cols+nx]===type)return true;} return false;
+}
+function isFuel(x,y){ if(!inBounds(x,y))return false; const i=y*cols+x,c=cur[i],n=next[i]; return (c===T.WOOD||c===T.OIL||c===T.PLANT)||(n===T.WOOD||n===T.OIL||n===T.PLANT); }
+function ignite(x,y){ if(!inBounds(x,y))return; const i=y*cols+x,h=(next[i]===T.WOOD||next[i]===T.OIL||next[i]===T.PLANT); if(!h&&!(cur[i]===T.WOOD||cur[i]===T.OIL||cur[i]===T.PLANT))return; cur[i]=T.FIRE; next[i]=T.FIRE; life[i]=40+Math.random()*50; }
+function explode(cx,cy,radius,power){
+  cur[cx+cy*cols]=T.EMPTY; next[cx+cy*cols]=T.EMPTY;
+  // record blast for people
+  blastEvents.push({x:cx*CELL+2,y:cy*CELL+2,r:radius*CELL});
+  for(let dy=-radius;dy<=radius;dy++)for(let dx=-radius;dx<=radius;dx++){
+    if(dx*dx+dy*dy>radius*radius)continue;
+    const nx=cx+dx,ny=cy+dy;if(!inBounds(nx,ny))continue;const ni=ny*cols+nx,t=cur[ni];
+    if(t!==T.EMPTY&&t!==T.STONE&&t!==T.METAL&&t!==T.OBSIDIAN&&t!==T.GLASS&&t!==T.CONCRETE){if(Math.random()<0.8){cur[ni]=T.EMPTY;next[ni]=T.EMPTY;}}
+    if(dx*dx+dy*dy>=radius*radius/2){if(Math.random()<0.5){cur[ni]=T.FIRE;life[ni]=20+Math.random()*25;}else if(Math.random()<0.5){cur[ni]=T.SMOKE;life[ni]=40;}}
+  }
+  cur[cx+cy*cols]=T.FIRE;life[cx+cy*cols]=25;
+}
+
+// heat system (diffuses through air+solids, drives phase changes)
+function diffuseHeat(){
+  const nbr=[[1,0],[-1,0],[0,1],[0,-1]];
+  const rad=[[1,0],[-1,0],[0,1],[0,-1],[1,1],[-1,-1],[1,-1],[-1,1]];
+  const eff=i=>cur[i]!==T.EMPTY?cur[i]:next[i];
+  for(let y=0;y<rows;y++)for(let x=0;x<cols;x++){
+    const i=y*cols+x,t=eff(i);
+    if(t===T.FIRE){temp[i]=Math.min(1,temp[i]+0.12);for(const[dx,dy]of rad){const x2=x+dx,y2=y+dy;if(!inBounds(x2,y2))continue;const ni=y2*cols+x2,nt=eff(ni);if(nt!==T.STONE&&nt!==T.METAL&&nt!==T.OBSIDIAN&&nt!==T.CONCRETE)temp[ni]=Math.min(1,temp[ni]+0.3);}}
+    else if(t===T.LAVA){for(const[dx,dy]of rad){const x2=x+dx,y2=y+dy;if(!inBounds(x2,y2))continue;const ni=y2*cols+x2,nt=eff(ni);if(nt!==T.ICE&&nt!==T.LAVA)temp[ni]=Math.min(1,temp[ni]+0.18);}}
+  }
+  for(let y=0;y<rows;y++)for(let x=0;x<cols;x++){
+    const i=y*cols+x;let s=temp[i],cc=1;
+    for(const[dx,dy]of nbr){const x2=x+dx,y2=y+dy;if(!inBounds(x2,y2))continue;s+=temp[y2*cols+x2];cc++;}
+    temp[i]+=(s/cc-temp[i])*0.25;
+    const t=eff(i);
+    if(t===T.ICE&&temp[i]>0.5){cur[i]=T.WATER;next[i]=T.WATER;temp[i]=0.35;}
+    else if(t===T.WOOD&&temp[i]>0.7&&Math.random()<0.03){ignite(x,y);}
+    else if(t===T.OIL&&temp[i]>0.7&&Math.random()<0.03){ignite(x,y);}
+    else if(t===T.PLANT&&temp[i]>0.75&&Math.random()<0.03){ignite(x,y);}
+    else if((t===T.GUNPOWDER||t===T.NITRO)&&temp[i]>0.75&&Math.random()<0.08){explode(x,y,2,3);}
+  }
+}
+
+// people interact with the grid (called once per grid update)
+function peopleReact(){
+  for(const p of people){
+    if(p.state==='dead')continue;
+    // explosion knockback
+    for(const b of blastEvents){
+      const dx=p.x-b.x, dy=p.y-b.y, d=Math.hypot(dx,dy);
+      if(d < b.r+10){ p.hp-=0.25; const f=(b.r+10-d)/(b.r+10); p.vx+=(dx/(d||1))*f*2; p.vy-=(dy/(d||1))*f*1.5-0.5; }
+    }
+    // crush under heavy falling solids (sand/stone/concrete landing on top)
+  }
+}
+
+// ================= Render =================
+function draw(){
+  ctx.fillStyle='#0b0d12'; ctx.fillRect(0,0,W,H);
+  const inset=1;
+  // solids & everything
+  for(let y=0;y<rows;y++){const row=y*cols;for(let x=0;x<cols;x++){const t=cur[row+x];if(t===T.EMPTY)continue;ctx.fillStyle=cellColor(x,y,t);ctx.fillRect(x*CELL+inset,y*CELL,CELL-(inset?1:0),CELL-1);}}
+  // glow for hot/bright
+  ctx.globalCompositeOperation='lighter';
+  for(let y=0;y<rows;y++){const row=y*cols;for(let x=0;x<cols;x++){const t=cur[row+x];if(t===T.FIRE||t===T.LAVA||t===T.SPARK||t===T.NITRO){const px=x*CELL+1,py=y*CELL;const g=ctx.createRadialGradient(px+2,py+2,0.5,px+2,py+2,CELL*2.2);const col=t===T.SPARK?'120,200,255':t===T.LAVA?'255,80,0':'255,120,30';g.addColorStop(0,'rgba('+col+',0.5)');g.addColorStop(1,'rgba(0,0,0,0)');ctx.fillStyle=g;ctx.fillRect(px-CELL,py-CELL,CELL*3,CELL*3);}}}
+  ctx.globalCompositeOperation='source-over';
+  // people (stick figures)
+  for(const p of people){ if(p.state==='dead')continue; drawPerson(p); }
+  // vignette
+  const vg=ctx.createRadialGradient(W/2,H/2,Math.min(W,H)*0.32,W/2,H/2,Math.max(W,H)*0.78);
+  vg.addColorStop(0,'rgba(0,0,0,0)');vg.addColorStop(1,'rgba(0,0,0,0.38)');
+  ctx.fillStyle=vg;ctx.fillRect(0,0,W,H);
+}
+
+function drawPerson(p){
+  const x=p.x, y=p.y; // y = feet-ish
+  const bob=Math.sin(p.walkCycle)*1.2;
+  const facing=p.dir;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.lineWidth=1.4; ctx.lineCap='round';
+  // shadow-ish grounding
+  ctx.strokeStyle='rgba(0,0,0,0.35)'; ctx.beginPath(); ctx.ellipse(0,1,3.4,1,0,0,6.28); ctx.stroke();
+  // legs (walking swing)
+  const swing=Math.sin(p.walkCycle)*(p.state==='drowning'?0:2.4);
+  ctx.strokeStyle='#2c2f36';
+  ctx.beginPath(); ctx.moveTo(0,-7); ctx.lineTo(-2.2+swing*0.6,0); ctx.moveTo(0,-7); ctx.lineTo(2.2-swing*0.6,0); ctx.stroke();
+  // torso (random shirt color)
+  ctx.strokeStyle='hsl('+p.hue+',55%,55%)';
+  ctx.beginPath(); ctx.moveTo(0,-7); ctx.lineTo(0,-14); ctx.stroke();
+  // arms (drowning: flail up)
+  const armSwing = p.state==='drowning'? 4 : Math.sin(p.walkCycle+1.5)*2;
+  ctx.lineWidth=1.2;
+  ctx.beginPath(); ctx.moveTo(0,-13); ctx.lineTo(-3-armSwing*0.5,-9); ctx.moveTo(0,-13); ctx.lineTo(3+armSwing*0.5,-9); ctx.stroke();
+  // head
+  ctx.fillStyle=p.state==='drowning'?'#8fd4ff':'#f6d5b0';
+  ctx.beginPath(); ctx.arc(0,-15.5,2.4,0,6.28); ctx.fill();
+  // hp bar if damaged
+  if(p.hp<0.99&&p.state==='alive'){
+    ctx.strokeStyle='#333'; ctx.strokeRect(-3.4,-20,6.8,1.2);
+    ctx.strokeStyle=p.hp>0.5?'#3f6':'#f33'; ctx.beginPath(); ctx.moveTo(-3.4,-19.4); ctx.lineTo(-3.4+p.hp*6.8,-19.4); ctx.stroke();
+  }
+  // drowning bubbles
+  if(p.state==='drowning'){ ctx.fillStyle='rgba(150,210,255,0.6)'; ctx.beginPath(); ctx.arc(3,-12,bob+1,0,6.28); ctx.fill(); }
+  ctx.restore();
+}
+
+// ================= Main loop =================
+let running=false, acc=0, lastT=0;
+function frame(ts){
+  const dt = lastT? Math.min(0.05,(ts-lastT)/1000): 0.016; lastT=ts;
+  if(!paused){
+    // run simulation with an accumulator ~60Hz
+    acc+=dt;
+    const step=1/60;
+    let n=0;
+    while(acc>=step && n<3){ update(); promote(); acc-=step; n++; }
+  }
+  draw();
+  requestAnimationFrame(frame);
+}
+function scheduleTick(){ if(!running){running=true;requestAnimationFrame(frame);} }
+
+function init(){
+  resize(); scheduleTick();
+  if(statusEl) statusEl.textContent=(toolDefs.find(d=>d.t===brushType)||{label:''}).label+' · '+(people.length?people.length+' 👤':'');
+  setInterval(()=>{ if(!statusEl)return; const lbl=(toolDefs.find(d=>d.t===brushType)||{label:''}).label; statusEl.textContent=lbl+(painting?' · drawing':'')+(people.length?' · '+people.length+' 👤':''); },500);
+}
+if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',init);}else{init();}
+window.addEventListener('load',function(){try{resize();}catch(e){}});
+window.addEventListener('orientationchange',function(){setTimeout(resize,150);});
+
+})();
+</script>
+</body>
+</html>
