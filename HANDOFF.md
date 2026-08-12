@@ -1,7 +1,7 @@
 # Falling Sand — Chemistry Sim (handoff)
 
 ## Path
-`/home/coinupbtc/Documents/projects/falling-sand/index.html` (single self-contained HTML).
+`index.html` in this repo (single self-contained HTML) (single self-contained HTML).
 
 ## What it is
 Cellular-automaton sandbox / chemistry simulator with **25 tools**: 24 elements + a
