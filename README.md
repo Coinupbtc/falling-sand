@@ -2,8 +2,6 @@
 
 ![Screenshot](docs/screenshots/hero.png)
 
-
-
 ![Gameplay](docs/screenshots/gameplay.png)
 
 A browser falling-sand toy with chemistry reactions, bridge stress tests, and little walkers.
@@ -19,7 +17,7 @@ A browser falling-sand toy with chemistry reactions, bridge stress tests, and li
 ## Try it
 
 ### One click
-Open [`index.html`](./index.html) in any modern browser.
+Open [`index.html`](./index.html) in any modern browser, or **[the GitHub Pages build](https://coinupbtc.github.io/falling-sand/)**.
 
 ### One command
 ```bash
